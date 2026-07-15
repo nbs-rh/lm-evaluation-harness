@@ -357,6 +357,7 @@ def _build_additional_info(
     num_fewshot: int,
     random_seed: int,
     hf_offline: bool,
+    overall_score: float | None,
 ) -> dict[str, str | int | float | bool | None]:
     """Build the additional_info dict from lm-eval results and run configuration.
 
@@ -365,21 +366,43 @@ def _build_additional_info(
     logic to be unit-tested independently.
     """
     task_cfg = lmeval_results.get("configs", {}).get(benchmark_id, {})
-    use_prompt = task_cfg.get("use_prompt")
     n_samples = lmeval_results.get("n-samples", {}).get(benchmark_id, {})
     fewshot_cfg = task_cfg.get("fewshot_config") or {}
+
+    # CoT detection — layered heuristic (no single reliable signal in lm-eval)
+    tags = task_cfg.get("tag", [])
+    if isinstance(tags, str):
+        tags = [tags]
+    doc_to_text = str(task_cfg.get("doc_to_text", ""))
+    is_cot = (
+        "chain_of_thought" in tags
+        or "cot" in benchmark_id.lower().replace("-", "_").split("_")
+        or "think step by step" in doc_to_text.lower()
+    )
+
+    is_zero_shot = num_fewshot == 0 and not is_cot
+
+    # alt_prompting_description: human-readable label for non-zero-shot strategies
+    alt_prompting_description = None
+    if not is_zero_shot:
+        parts = []
+        if num_fewshot > 0:
+            parts.append(f"{num_fewshot}-Shot")
+        if is_cot:
+            parts.append("CoT")
+        alt_prompting_description = " ".join(parts) if parts else None
 
     return {
         # benchmark configuration
         "num_fewshot": num_fewshot,
         "random_seed": random_seed,
-        "zero_shot": num_fewshot == 0,
         "output_type": task_cfg.get("output_type"),
         "dataset_split": task_cfg.get("test_split"),
         "dataset_name": task_cfg.get("dataset_name"),
-        # prompting
-        "alt_prompting": use_prompt is not None,
-        "alt_prompting_description": use_prompt,
+        # prompting strategy — score when applicable, None otherwise
+        "zero_shot": overall_score if is_zero_shot else None,
+        "alt_prompting": overall_score if not is_zero_shot else None,
+        "alt_prompting_description": alt_prompting_description,
         "description": task_cfg.get("description") or None,
         "system_instruction": fewshot_cfg.get("system_prompt"),
         # sample counts
@@ -391,7 +414,11 @@ def _build_additional_info(
         # runtime / reproducibility
         "lmeval_version": str(lmeval_results.get("lm_eval_version", "unknown")),
         "lmeval_git_hash": lmeval_results.get("git_hash"),
-        "evaluation_date": str(lmeval_results.get("date", "")),
+        "evaluation_date": (
+            datetime.fromtimestamp(lmeval_results["date"], tz=UTC).isoformat()
+            if lmeval_results.get("date")
+            else None
+        ),
         "num_concurrent": model_args.get("num_concurrent"),
         "batch_size": model_args.get("batch_size"),
         "tokenizer": model_args.get("tokenizer"),
@@ -678,17 +705,6 @@ class LMEvalAdapter(FrameworkAdapter):
                 ),
             )
 
-            # Capture run metadata for generate_additional_info()
-            self._run_info = _build_additional_info(
-                lmeval_results=results,
-                benchmark_id=benchmark_id,
-                benchmark_params=benchmark_params,
-                model_args=model_args,
-                num_fewshot=num_fewshot,
-                random_seed=random_seed,
-                hf_offline=hf_offline,
-            )
-
             # Phase 4: Post-processing
             callbacks.report_status(
                 JobStatusUpdate(
@@ -763,6 +779,18 @@ class LMEvalAdapter(FrameworkAdapter):
                 )
                 if overall_score is None:
                     overall_score = value
+
+            # Capture run metadata for generate_additional_info() — needs overall_score
+            self._run_info = _build_additional_info(
+                lmeval_results=results,
+                benchmark_id=benchmark_id,
+                benchmark_params=benchmark_params,
+                model_args=model_args,
+                num_fewshot=num_fewshot,
+                random_seed=random_seed,
+                hf_offline=hf_offline,
+                overall_score=overall_score,
+            )
 
             # Get number of examples evaluated
             samples = results.get("samples", {}).get(benchmark_id, [])
