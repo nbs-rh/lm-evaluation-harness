@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+
 _TEST_DATA_DIR = "/test_data"
 # EvalHub mounts the job spec JSON under this directory only; reject other paths (CWE-22).
 _JOB_SPEC_ALLOWED_ROOT = Path("/meta")
@@ -348,6 +349,90 @@ def _evaluation_failure_for_evalhub(exc: BaseException) -> tuple[str, str]:
     )
 
 
+def _build_additional_info(
+    lmeval_results: dict,
+    benchmark_id: str,
+    benchmark_params: dict,
+    model_args: dict,
+    num_fewshot: int,
+    random_seed: int,
+    hf_offline: bool,
+) -> dict[str, str | int | float | bool | None]:
+    """Build the additional_info dict from lm-eval results and run configuration.
+
+    Collects all supplementary scalar metadata for the EvalCard. Extracting this
+    into a standalone function keeps run_benchmark_job readable and allows the
+    logic to be unit-tested independently.
+    """
+    task_cfg = lmeval_results.get("configs", {}).get(benchmark_id, {})
+    use_prompt = task_cfg.get("use_prompt")
+    n_samples = lmeval_results.get("n-samples", {}).get(benchmark_id, {})
+    fewshot_cfg = task_cfg.get("fewshot_config") or {}
+
+    return {
+        # benchmark configuration
+        "num_fewshot": num_fewshot,
+        "random_seed": random_seed,
+        "zero_shot": num_fewshot == 0,
+        "output_type": task_cfg.get("output_type"),
+        "dataset_split": task_cfg.get("test_split"),
+        "dataset_name": task_cfg.get("dataset_name"),
+        # prompting
+        "alt_prompting": use_prompt is not None,
+        "alt_prompting_description": use_prompt,
+        "description": task_cfg.get("description") or None,
+        "system_instruction": fewshot_cfg.get("system_prompt"),
+        # sample counts
+        "num_samples_original": n_samples.get("original"),
+        "num_samples_effective": n_samples.get("effective"),
+        # dataset provenance
+        "dataset_sha": _extract_dataset_sha(lmeval_results, benchmark_id),
+        "task_version": lmeval_results.get("versions", {}).get(benchmark_id),
+        # runtime / reproducibility
+        "lmeval_version": str(lmeval_results.get("lm_eval_version", "unknown")),
+        "lmeval_git_hash": lmeval_results.get("git_hash"),
+        "evaluation_date": str(lmeval_results.get("date", "")),
+        "num_concurrent": model_args.get("num_concurrent"),
+        "batch_size": model_args.get("batch_size"),
+        "tokenizer": model_args.get("tokenizer"),
+        "hf_offline": hf_offline,
+        "timeout_seconds": int(benchmark_params.get("timeout_seconds", 300)),
+    }
+
+
+def _extract_dataset_sha(lmeval_results: dict, benchmark_id: str) -> str | None:
+    """Return the HF dataset git commit SHA from the local HF cache.
+
+    Uses get_dataset_config_info() with local_files_only=True so no network
+    call is made — lm-eval has already downloaded the dataset. The SHA is
+    embedded in the cached DatasetInfo.download_checksums URL as @<40-char-hex>.
+    """
+    try:
+        import re
+        from datasets import get_dataset_config_info
+        from datasets.download.download_config import DownloadConfig
+
+        configs = lmeval_results.get("configs", {})
+        task_cfg = configs.get(benchmark_id, {})
+        dataset_path = task_cfg.get("dataset_path")
+        dataset_name = task_cfg.get("dataset_name")
+        if not dataset_path:
+            return None
+        info = get_dataset_config_info(
+            dataset_path,
+            config_name=dataset_name,
+            download_config=DownloadConfig(local_files_only=True),
+        )
+        sha_re = re.compile(r"@([0-9a-f]{40})")
+        for url in (info.download_checksums or {}):
+            m = sha_re.search(url)
+            if m:
+                return m.group(1)
+    except Exception:
+        logger.debug("_extract_dataset_sha failed", exc_info=True)
+    return None
+
+
 def build_lmeval_config(job_spec: JobSpec) -> tuple[str, dict, str | None]:
     """Derive lm-evaluation-harness model backend + args from job spec.
 
@@ -450,7 +535,14 @@ class LMEvalAdapter(FrameworkAdapter):
                           If not provided, uses EVALHUB_JOB_SPEC_PATH env var or default.
         """
         super().__init__(job_spec_path=job_spec_path)
+        self._run_info: dict[str, str | int | float | bool | None] = {}
         logger.info("LMEval adapter initialized")
+
+    def generate_additional_info(
+        self, results: JobResults
+    ) -> dict[str, str | int | float | bool | None] | None:
+        """Return lm-eval-specific supplementary metadata captured during the run."""
+        return self._run_info or None
 
     def run_benchmark_job(self, config: JobSpec, callbacks: JobCallbacks) -> JobResults:
         """Run LMEval benchmark with evalhub callbacks.
@@ -559,6 +651,7 @@ class LMEvalAdapter(FrameworkAdapter):
 
             # Run evaluation based on job spec
             # Note: batch_size is passed in model_args for local-completions backend
+            logger.info("simple_evaluate starting — model=%s benchmark=%s", model_backend, benchmark_id)
             try:
                 results = simple_evaluate(
                     model=model_backend,
@@ -576,6 +669,25 @@ class LMEvalAdapter(FrameworkAdapter):
                 )
             finally:
                 _datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = _prev_trust_remote_code
+            logger.info(
+                "simple_evaluate results: %s",
+                json.dumps(
+                    {k: v for k, v in results.items() if k != "samples"},
+                    indent=2,
+                    default=str,
+                ),
+            )
+
+            # Capture run metadata for generate_additional_info()
+            self._run_info = _build_additional_info(
+                lmeval_results=results,
+                benchmark_id=benchmark_id,
+                benchmark_params=benchmark_params,
+                model_args=model_args,
+                num_fewshot=num_fewshot,
+                random_seed=random_seed,
+                hf_offline=hf_offline,
+            )
 
             # Phase 4: Post-processing
             callbacks.report_status(
@@ -802,6 +914,10 @@ def main() -> int:
         logger.info(f"Overall score: {results.overall_score}")
         logger.info(f"Examples evaluated: {results.num_examples_evaluated}")
         logger.info(f"Duration: {results.duration_seconds:.2f}s")
+        logger.info(
+            "run_benchmark_job results: %s",
+            json.dumps(results.model_dump(mode="json"), indent=2, default=str),
+        )
         logger.info("=" * 80)
 
         # MLflow first; run id from save() is sent on report_results when SDK returns it.
