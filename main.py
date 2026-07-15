@@ -629,7 +629,7 @@ class LMEvalAdapter(FrameworkAdapter):
             num_examples = config.num_examples
 
             # Adapter-specific params from parameters
-            num_fewshot = int(benchmark_params.get("num_fewshot", benchmark_params.get("num_few_shot", 0)))
+            num_fewshot = int(benchmark_params.get("num_few_shot", 0))
             random_seed = int(benchmark_params.get("random_seed", 42))
 
             model_backend, model_args, gen_kwargs = build_lmeval_config(config)
@@ -918,7 +918,7 @@ def main() -> int:
         logger.info(f"  Benchmark: {adapter.job_spec.benchmark_id}")
         logger.info(f"  Model: {adapter.job_spec.model.name}")
         logger.info(f"  Examples: {adapter.job_spec.num_examples}")
-        few_shot = adapter.job_spec.parameters.get("num_fewshot", adapter.job_spec.parameters.get("num_few_shot"))
+        few_shot = adapter.job_spec.parameters.get("num_few_shot")
         logger.info(f"  Few-shot: {few_shot}")
         logger.info("=" * 80)
         logger.info(f"Callback URL: {adapter.job_spec.callback_url}")
