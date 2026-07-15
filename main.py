@@ -696,15 +696,6 @@ class LMEvalAdapter(FrameworkAdapter):
                 )
             finally:
                 _datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = _prev_trust_remote_code
-            logger.info(
-                "simple_evaluate results: %s",
-                json.dumps(
-                    {k: v for k, v in results.items() if k != "samples"},
-                    indent=2,
-                    default=str,
-                ),
-            )
-
             # Phase 4: Post-processing
             callbacks.report_status(
                 JobStatusUpdate(
@@ -942,10 +933,6 @@ def main() -> int:
         logger.info(f"Overall score: {results.overall_score}")
         logger.info(f"Examples evaluated: {results.num_examples_evaluated}")
         logger.info(f"Duration: {results.duration_seconds:.2f}s")
-        logger.info(
-            "run_benchmark_job results: %s",
-            json.dumps(results.model_dump(mode="json"), indent=2, default=str),
-        )
         logger.info("=" * 80)
 
         # MLflow first; run id from save() is sent on report_results when SDK returns it.
