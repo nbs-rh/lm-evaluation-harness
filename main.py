@@ -375,9 +375,19 @@ def _build_additional_info(
     into a standalone function keeps run_benchmark_job readable and allows the
     logic to be unit-tested independently.
     """
+    global_cfg = lmeval_results.get("config", {})
     task_cfg = lmeval_results.get("configs", {}).get(benchmark_id, {})
     n_samples = lmeval_results.get("n-samples", {}).get(benchmark_id, {})
     fewshot_cfg = task_cfg.get("fewshot_config") or {}
+
+    # Primary metric — first entry in metric_list; falls back to subtask for group tasks
+    metric_list = task_cfg.get("metric_list") or []
+    if not metric_list:
+        subtasks = lmeval_results.get("group_subtasks", {}).get(benchmark_id, [])
+        if subtasks:
+            first_subtask_cfg = lmeval_results.get("configs", {}).get(subtasks[0], {})
+            metric_list = first_subtask_cfg.get("metric_list") or []
+    primary_metric = metric_list[0].get("metric") if metric_list else None
 
     # CoT detection — layered heuristic (no single reliable signal in lm-eval)
     tags = task_cfg.get("tag", [])
@@ -408,6 +418,10 @@ def _build_additional_info(
         "random_seed": random_seed,
         "output_type": task_cfg.get("output_type"),
         "dataset_split": task_cfg.get("test_split"),
+        "primary_metric": primary_metric,
+        "tags": tags if tags else None,
+        "limit": global_cfg.get("limit"),
+        "gen_kwargs": global_cfg.get("gen_kwargs"),
         # prompting strategy — score when applicable, None otherwise
         "zero_shot": overall_score if is_zero_shot else None,
         "alt_prompting": overall_score if not is_zero_shot else None,
@@ -446,7 +460,6 @@ def _build_dataset_info(lmeval_results: dict, benchmark_id: str) -> list[dict[st
     Each record contains hf_repo, hf_subset, and sha read from local HF cache.
     Returns None if no dataset info can be determined.
     """
-    import re
     try:
         from datasets import get_dataset_config_info
         from datasets.download.download_config import DownloadConfig
