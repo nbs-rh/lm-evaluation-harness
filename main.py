@@ -358,10 +358,10 @@ def _build_additional_info(
     random_seed: int,
     hf_offline: bool,
     overall_score: float | None,
-) -> dict[str, str | int | float | bool | None]:
+) -> dict[str, Any]:
     """Build the additional_info dict from lm-eval results and run configuration.
 
-    Collects all supplementary scalar metadata for the EvalCard. Extracting this
+    Collects all supplementary metadata for the EvalCard. Extracting this
     into a standalone function keeps run_benchmark_job readable and allows the
     logic to be unit-tested independently.
     """
@@ -392,13 +392,12 @@ def _build_additional_info(
             parts.append("CoT")
         alt_prompting_description = " ".join(parts) if parts else None
 
-    return {
+    raw = {
         # benchmark configuration
         "num_fewshot": num_fewshot,
         "random_seed": random_seed,
         "output_type": task_cfg.get("output_type"),
         "dataset_split": task_cfg.get("test_split"),
-        "dataset_name": task_cfg.get("dataset_name"),
         # prompting strategy — score when applicable, None otherwise
         "zero_shot": overall_score if is_zero_shot else None,
         "alt_prompting": overall_score if not is_zero_shot else None,
@@ -408,8 +407,8 @@ def _build_additional_info(
         # sample counts
         "num_samples_original": n_samples.get("original"),
         "num_samples_effective": n_samples.get("effective"),
-        # dataset provenance
-        "dataset_sha": _extract_dataset_sha(lmeval_results, benchmark_id),
+        # dataset provenance — list to support group tasks with multiple datasets
+        "dataset": _build_dataset_info(lmeval_results, benchmark_id),
         "task_version": lmeval_results.get("versions", {}).get(benchmark_id),
         # runtime / reproducibility
         "lmeval_version": str(lmeval_results.get("lm_eval_version", "unknown")),
@@ -426,38 +425,67 @@ def _build_additional_info(
         "timeout_seconds": int(benchmark_params.get("timeout_seconds", 300)),
     }
 
+    # Exclude fields with None values to keep the output clean
+    return {k: v for k, v in raw.items() if v is not None}
 
-def _extract_dataset_sha(lmeval_results: dict, benchmark_id: str) -> str | None:
-    """Return the HF dataset git commit SHA from the local HF cache.
 
-    Uses get_dataset_config_info() with local_files_only=True so no network
-    call is made — lm-eval has already downloaded the dataset. The SHA is
-    embedded in the cached DatasetInfo.download_checksums URL as @<40-char-hex>.
+def _build_dataset_info(lmeval_results: dict, benchmark_id: str) -> list[dict[str, str]] | None:
+    """Build a list of dataset provenance records for the benchmark.
+
+    For group tasks (multiple subtasks), collects dataset info from each subtask.
+    Each record contains hf_repo, hf_subset, and sha read from local HF cache.
+    Returns None if no dataset info can be determined.
     """
+    import re
     try:
-        import re
         from datasets import get_dataset_config_info
         from datasets.download.download_config import DownloadConfig
+    except ImportError:
+        return None
 
-        configs = lmeval_results.get("configs", {})
-        task_cfg = configs.get(benchmark_id, {})
+    sha_re = re.compile(r"@([0-9a-f]{40})")
+    configs = lmeval_results.get("configs", {})
+
+    # Collect task ids to inspect — the benchmark itself plus any subtasks
+    subtasks = lmeval_results.get("group_subtasks", {}).get(benchmark_id, [])
+    task_ids = subtasks if subtasks else [benchmark_id]
+
+    seen = set()
+    records = []
+    for task_id in task_ids:
+        task_cfg = configs.get(task_id, {})
         dataset_path = task_cfg.get("dataset_path")
         dataset_name = task_cfg.get("dataset_name")
         if not dataset_path:
-            return None
-        info = get_dataset_config_info(
-            dataset_path,
-            config_name=dataset_name,
-            download_config=DownloadConfig(local_files_only=True),
-        )
-        sha_re = re.compile(r"@([0-9a-f]{40})")
-        for url in (info.download_checksums or {}):
-            m = sha_re.search(url)
-            if m:
-                return m.group(1)
-    except Exception:
-        logger.debug("_extract_dataset_sha failed", exc_info=True)
-    return None
+            continue
+        key = (dataset_path, dataset_name)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        sha = None
+        try:
+            info = get_dataset_config_info(
+                dataset_path,
+                config_name=dataset_name,
+                download_config=DownloadConfig(local_files_only=True),
+            )
+            for url in (info.download_checksums or {}):
+                m = sha_re.search(url)
+                if m:
+                    sha = m.group(1)
+                    break
+        except Exception:
+            logger.debug("_build_dataset_info: could not get SHA for %s/%s", dataset_path, dataset_name, exc_info=True)
+
+        record: dict[str, str] = {"hf_repo": dataset_path}
+        if dataset_name:
+            record["hf_subset"] = dataset_name
+        if sha:
+            record["sha"] = sha
+        records.append(record)
+
+    return records if records else None
 
 
 def build_lmeval_config(job_spec: JobSpec) -> tuple[str, dict, str | None]:
@@ -562,12 +590,12 @@ class LMEvalAdapter(FrameworkAdapter):
                           If not provided, uses EVALHUB_JOB_SPEC_PATH env var or default.
         """
         super().__init__(job_spec_path=job_spec_path)
-        self._run_info: dict[str, str | int | float | bool | None] = {}
+        self._run_info: dict[str, Any] = {}
         logger.info("LMEval adapter initialized")
 
     def generate_additional_info(
         self, results: JobResults
-    ) -> dict[str, str | int | float | bool | None] | None:
+    ) -> dict[str, Any] | None:
         """Return lm-eval-specific supplementary metadata captured during the run."""
         return self._run_info or None
 
@@ -678,7 +706,6 @@ class LMEvalAdapter(FrameworkAdapter):
 
             # Run evaluation based on job spec
             # Note: batch_size is passed in model_args for local-completions backend
-            logger.info("simple_evaluate starting — model=%s benchmark=%s", model_backend, benchmark_id)
             try:
                 results = simple_evaluate(
                     model=model_backend,
