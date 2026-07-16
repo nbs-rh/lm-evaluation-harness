@@ -35,6 +35,14 @@ from typing import Any
 
 
 _TEST_DATA_DIR = "/test_data"
+
+
+def _get_lmeval_version() -> str:
+    try:
+        from importlib.metadata import version
+        return version("lm_eval")
+    except Exception:
+        return "unknown"
 # EvalHub mounts the job spec JSON under this directory only; reject other paths (CWE-22).
 _JOB_SPEC_ALLOWED_ROOT = Path("/meta")
 
@@ -411,7 +419,7 @@ def _build_additional_info(
         "dataset": _build_dataset_info(lmeval_results, benchmark_id),
         "task_version": lmeval_results.get("versions", {}).get(benchmark_id),
         # runtime / reproducibility
-        "lmeval_version": str(lmeval_results.get("lm_eval_version", "unknown")),
+        "lmeval_version": str(lmeval_results.get("lm_eval_version") or _get_lmeval_version()),
         "lmeval_git_hash": lmeval_results.get("git_hash"),
         "evaluation_date": (
             datetime.fromtimestamp(lmeval_results["date"], tz=UTC).isoformat()
