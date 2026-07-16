@@ -38,11 +38,13 @@ _TEST_DATA_DIR = "/test_data"
 
 
 def _get_lmeval_version() -> str:
+    from importlib.metadata import PackageNotFoundError, version
     try:
-        from importlib.metadata import version
         return version("lm_eval")
-    except Exception:
+    except PackageNotFoundError:
         return "unknown"
+
+
 # EvalHub mounts the job spec JSON under this directory only; reject other paths (CWE-22).
 _JOB_SPEC_ALLOWED_ROOT = Path("/meta")
 
