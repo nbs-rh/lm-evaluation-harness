@@ -24,6 +24,7 @@ files and do not call the Hub. You do not need ``parameters.offline``.
 
 import json
 import logging
+import math
 import os
 import re
 import requests
@@ -266,6 +267,23 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_jsonable(v) for v in value]
     return str(value)
+
+
+def _to_finite_float(metric_value: Any) -> float | None:
+    """Return a finite float, or None for N/A / non-numeric / NaN / Inf.
+
+    BBQ category bias aggregators return NaN when a category has no examples
+    (common with num_examples/limit); those must not become EvaluationResults.
+    """
+    if metric_value == "N/A" or metric_value is None:
+        return None
+    try:
+        value = float(metric_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
 
 
 def _sanitize_error_message(msg: str) -> str:
@@ -779,8 +797,11 @@ class LMEvalAdapter(FrameworkAdapter):
                                 continue
                             if metric_value == "N/A" or metric_value is None:
                                 continue
+                            value = _to_finite_float(metric_value)
+                            if value is None:
+                                continue
                             clean, _, _ = metric_name.rpartition(",")
-                            subtask_metrics[clean] = subtask_metrics.get(clean, 0) + float(metric_value)
+                            subtask_metrics[clean] = subtask_metrics.get(clean, 0) + value
                             subtask_count[clean] = subtask_count.get(clean, 0) + 1
                     task_results = {
                         f"{k},none": subtask_metrics[k] / subtask_count[k]
@@ -801,9 +822,8 @@ class LMEvalAdapter(FrameworkAdapter):
                         clean_metric,
                     )
                     continue
-                try:
-                    value = float(metric_value)
-                except (TypeError, ValueError):
+                value = _to_finite_float(metric_value)
+                if value is None:
                     continue
                 existing = metric_candidates.get(clean_metric)
                 if existing is None or filter_name == "none":
