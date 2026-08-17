@@ -226,6 +226,7 @@ from evalhub.adapter import (
     MessageInfo,
     OCIArtifactSpec,
 )
+from evalhub.models import MetricSchema, ResultType
 from evalhub.adapter.auth import read_model_auth_key, resolve_model_credentials
 
 
@@ -664,6 +665,12 @@ class LMEvalAdapter(FrameworkAdapter):
             lmeval_config = results.get("config", {})
             serializable_config = _jsonable(lmeval_config)
 
+            # All lm-eval metrics are numeric floats (cast above); declare accordingly.
+            metrics_schema = [
+                MetricSchema(name=r.metric_name, type=ResultType.NUMERIC)
+                for r in evaluation_results
+            ]
+
             # Create job results
             job_results = JobResults(
                 id=job_id,
@@ -671,6 +678,7 @@ class LMEvalAdapter(FrameworkAdapter):
                 benchmark_index=config.benchmark_index,
                 model_name=model_name,
                 results=evaluation_results,
+                metrics_schema=metrics_schema,
                 overall_score=overall_score,
                 num_examples_evaluated=int(num_examples_evaluated)
                 if num_examples_evaluated is not None
