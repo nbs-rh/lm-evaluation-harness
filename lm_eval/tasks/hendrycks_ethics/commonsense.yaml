@@ -3,12 +3,12 @@ tag:
 task: ethics_cm
 dataset_path: csv
 dataset_kwargs:
-  # Read the original CSVs directly instead of using the EleutherAI script,
-  # which downloads the Berkeley tarball. Sibling configs override this source.
+  # The EvalHub runtime init container stages the original CSVs from the pinned
+  # hendrycks/ethics Hub revision at /test_data. Sibling configs override this source.
   # Use test.csv as the harness test split, not the separate test_hard.csv.
   data_files:
-    train: https://huggingface.co/datasets/hendrycks/ethics/resolve/b8b47c589f8bee77175b8648e5497278b68da48a/data/commonsense/train.csv
-    test: https://huggingface.co/datasets/hendrycks/ethics/resolve/b8b47c589f8bee77175b8648e5497278b68da48a/data/commonsense/test.csv
+    train: /test_data/train.csv
+    test: /test_data/test.csv
 output_type: multiple_choice
 training_split: train
 test_split: test
